@@ -1,27 +1,29 @@
 #![no_std]
 #![no_main]
 
-use core::fmt::Write as _;
 use core::str::from_utf8;
 
 use cyw43::{JoinOptions, PowerManagementMode};
+use embassy_rp::clocks::clk_sys_freq;
+use embassy_rp::pwm::{Config as PwmConfig, Pwm, PwmOutput};
 use cyw43_firmware::CYW43_43439A0;
 use cyw43_firmware::CYW43_43439A0_CLM;
 use cyw43_pio::{PioSpi, DEFAULT_CLOCK_DIVIDER};
-use defmt::{error, info, unwrap, warn, Debug2Format};
+use defmt::{info, unwrap, warn, Debug2Format};
 use embassy_executor::Spawner;
 use embassy_net::dns::DnsSocket;
 use embassy_net::tcp::client::{TcpClient, TcpClientState};
 use embassy_net::{Config, StackResources};
 use embassy_rp::clocks::RoscRng;
 use embassy_rp::gpio::{Level, Output};
+use embedded_hal_1::pwm::SetDutyCycle;
 use embassy_rp::peripherals::PIO0;
 use embassy_rp::pio::{InterruptHandler, Pio};
 use embassy_rp::bind_interrupts;
 use embassy_time::{Duration, Timer};
 use embedded_io_async::Read;
-use heapless::String;
-use ir_sunrise::IrSignal;
+
+
 use reqwless::client::HttpClient;
 use reqwless::request::Method;
 use serde::Deserialize;
@@ -35,12 +37,62 @@ bind_interrupts!(struct Irqs {
 
 const WIFI_SSID: &str = env!("IR_SUNRISE_WIFI_SSID");
 const WIFI_PASSWORD: &str = env!("IR_SUNRISE_WIFI_PASSWORD");
-const HOSTNAME: &str = env!("IR_SUNRISE_HOST");
+const COMMAND_URL: &str = env!("IR_SUNRISE_URL");
+const POLL_PERIOD_MS: u64 = 5_000;
+
+const UP_PULSES: &[u32] = &[
+    20_198, 6_833, 2_306, 6_873, 2_342, 11_348, 2_408, 6_818, 2_291, 6_873, 2_350,
+];
+
+const DOWN_PULSES: &[u32] = &[
+    20_209, 6_795, 2_354, 6_794, 2_341, 11_418, 2_352, 9_127, 2_352, 2_213, 2_357,
+];
+
+const ON_PULSES: &[u32] = &[
+    20_213, 6_845, 2_296, 6_870, 2_347, 9_166, 2_284, 4_641, 2_275, 2_287, 6_923, 16_010,
+    20_701, 6_869, 2_340, 6_793, 2_352, 9_126, 2_347, 4_552, 2_272, 2_290, 6_882, 16_009,
+    20_686, 6_856, 2_297, 6_887, 2_280, 9_185, 2_277, 4_543, 2_349, 2_291, 6_886,
+];
+
+const OFF_PULSES: &[u32] = &[
+    20_195, 6_793, 2_375, 6_792, 2_350, 2_280, 9_202, 2_214, 2_358, 6_794, 2_362, 4_543,
+    2_362, 11_396, 20_657, 6_875, 2_304, 6_802, 2_359, 2_221, 9_195, 2_285, 2_351, 6_814,
+    2_361, 4_533, 2_283, 11_481, 20_636, 6_853, 2_354, 6_800, 2_348, 2_216, 9_282, 2_214,
+    2_347, 6_817, 2_364, 4_478, 2_348,
+];
 
 #[derive(Deserialize)]
-struct CommandPayload<'a> {
-    #[serde(default, borrow)]
-    command: Option<&'a str>,
+#[serde(rename_all = "lowercase")]
+enum Command {
+    Up,
+    Down,
+    On,
+    Off,
+}
+
+impl Command {
+    fn pulses(&self) -> &'static [u32] {
+        match self {
+            Command::Up => UP_PULSES,
+            Command::Down => DOWN_PULSES,
+            Command::On => ON_PULSES,
+            Command::Off => OFF_PULSES,
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Command::Up => "up",
+            Command::Down => "down",
+            Command::On => "on",
+            Command::Off => "off",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct CommandPayload {
+    command: Command,
 }
 
 #[embassy_executor::task]
@@ -55,48 +107,34 @@ async fn net_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<'sta
     runner.run().await
 }
 
-fn poll_period() -> Duration {
-    if let Some(ms_str) = option_env!("IR_SUNRISE_PERIOD_MS") {
-        if let Ok(ms) = ms_str.parse::<u64>() {
-            return Duration::from_millis(ms);
-        }
-        warn!("Failed to parse IR_SUNRISE_PERIOD_MS='{}', defaulting to 5000ms", ms_str);
-    } else {
-        warn!("IR_SUNRISE_PERIOD_MS not set, defaulting to 5000ms");
+
+
+async fn transmit_ir_signal(ir_led: &mut PwmOutput<'_>, pulses: &[u32]) {
+    info!("Transmitting {} pulses with PWM carrier", pulses.len());
+
+    if ir_led.set_duty_cycle_percent(0).is_err() {
+        warn!("Failed to disable IR carrier");
     }
-    Duration::from_millis(5000)
-}
 
-fn url_path() -> &'static str {
-    option_env!("IR_SUNRISE_PATH").unwrap_or("/")
-}
-
-fn build_url() -> Option<String<128>> {
-    let mut url = String::<128>::new();
-    if write!(&mut url, "http://{}{}", HOSTNAME, url_path()).is_err() {
-        return None;
-    }
-    Some(url)
-}
-
-async fn transmit_ir_signal(led: &mut Output<'_>, pulses: &[u32]) {
-    info!("Transmitting {} pulses", pulses.len());
-
-    led.set_high();
-    let mut is_low = true;
-
+    let mut mark = true;
     for &duration_us in pulses {
-        if is_low {
-            led.set_low();
+        if mark {
+            if ir_led.set_duty_cycle_percent(33).is_err() {
+                warn!("Failed to enable IR carrier");
+            }
         } else {
-            led.set_high();
+            if ir_led.set_duty_cycle_percent(0).is_err() {
+                warn!("Failed to disable IR carrier");
+            }
         }
 
         Timer::after(Duration::from_micros(duration_us as u64)).await;
-        is_low = !is_low;
+        mark = !mark;
     }
 
-    led.set_high();
+    if ir_led.set_duty_cycle_percent(0).is_err() {
+        warn!("Failed to disable IR carrier");
+    }
     info!("IR transmission complete");
 }
 
@@ -107,18 +145,17 @@ async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
     let mut rng = RoscRng;
 
-    let fw = CYW43_43439A0;
-    let clm = CYW43_43439A0_CLM;
-
-    let pwr = Output::new(p.PIN_23, Level::Low);
-    let cs = Output::new(p.PIN_25, Level::High);
-    let mut pio = Pio::new(p.PIO0, Irqs);
-    let spi = PioSpi::new(
-        &mut pio.common,
-        pio.sm0,
+    let wifi_fw = CYW43_43439A0;
+    let wifi_clm = CYW43_43439A0_CLM;
+    let wifi_pwr = Output::new(p.PIN_23, Level::Low);
+    let wifi_cs = Output::new(p.PIN_25, Level::High);
+    let mut wifi_pio = Pio::new(p.PIO0, Irqs);
+    let wifi_spi = PioSpi::new(
+        &mut wifi_pio.common,
+        wifi_pio.sm0,
         DEFAULT_CLOCK_DIVIDER,
-        pio.irq0,
-        cs,
+        wifi_pio.irq0,
+        wifi_cs,
         p.PIN_24,
         p.PIN_29,
         p.DMA_CH0,
@@ -126,10 +163,10 @@ async fn main(spawner: Spawner) {
 
     static STATE: StaticCell<cyw43::State> = StaticCell::new();
     let state = STATE.init(cyw43::State::new());
-    let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw).await;
+    let (net_device, mut control, runner) = cyw43::new(state, wifi_pwr, wifi_spi, wifi_fw).await;
     unwrap!(spawner.spawn(cyw43_task(runner)));
 
-    control.init(clm).await;
+    control.init(wifi_clm).await;
     control
         .set_power_management(PowerManagementMode::PowerSave)
         .await;
@@ -146,38 +183,41 @@ async fn main(spawner: Spawner) {
 
     unwrap!(spawner.spawn(net_task(net_runner)));
 
-    while let Err(err) = control
-        .join(WIFI_SSID, JoinOptions::new(WIFI_PASSWORD.as_bytes()))
-        .await
-    {
-        warn!("Wi-Fi join failed: {}", Debug2Format(&err));
-        Timer::after(Duration::from_secs(2)).await;
-    }
+    let poll_period = Duration::from_millis(POLL_PERIOD_MS);
+    info!("Polling every {} ms", POLL_PERIOD_MS);
+    info!("Polling URL: {}", COMMAND_URL);
 
-    info!("Waiting for link up...");
-    stack.wait_link_up().await;
+    let carrier_top = clk_sys_freq() / 38_000 - 1;
+    let mut ir_pwm_config = PwmConfig::default();
+    ir_pwm_config.phase_correct = false;
+    ir_pwm_config.invert_b = true;
+    ir_pwm_config.top = carrier_top as u16;
+    ir_pwm_config.compare_b = 0;
+    info!("IR carrier PWM top: {}", carrier_top);
 
-    info!("Waiting for DHCP configuration...");
-    stack.wait_config_up().await;
-    info!("Network stack is ready");
-
-    let poll_period = poll_period();
-    info!("Polling every {} ms", poll_period.as_millis());
-
-    let command_url = match build_url() {
-        Some(url) => url,
-        None => {
-            error!("Failed to build polling URL, halting");
-            loop {
-                Timer::after(Duration::from_secs(10)).await;
-            }
-        }
-    };
-    info!("Polling URL: {}", command_url.as_str());
-
-    let mut ir_led = Output::new(p.PIN_15, Level::High);
+    let mut ir_pwm = Pwm::new_output_b(p.PWM_SLICE7, p.PIN_15, ir_pwm_config);
+    let mut ir_led = ir_pwm.split_by_ref().1.unwrap();
 
     loop {
+        if !stack.is_link_up() || !stack.is_config_up() {
+            info!("Wi-Fi not connected; attempting reconnect");
+
+            while let Err(err) = control
+                .join(WIFI_SSID, JoinOptions::new(WIFI_PASSWORD.as_bytes()))
+                .await
+            {
+                warn!("Wi-Fi join failed: {}", Debug2Format(&err));
+                Timer::after(Duration::from_secs(2)).await;
+            }
+
+            info!("Waiting for link up...");
+            stack.wait_link_up().await;
+
+            info!("Waiting for DHCP configuration...");
+            stack.wait_config_up().await;
+            info!("Network stack is ready");
+        }
+
         info!("Polling IR command endpoint");
         let mut rx_buffer = [0u8; 4096];
         let client_state = TcpClientState::<1, 4096, 4096>::new();
@@ -185,7 +225,7 @@ async fn main(spawner: Spawner) {
         let dns_client = DnsSocket::new(stack);
         let mut http_client = HttpClient::new(&tcp_client, &dns_client);
 
-        let mut request = match http_client.request(Method::GET, command_url.as_str()).await {
+        let mut request = match http_client.request(Method::GET, COMMAND_URL).await {
             Ok(req) => req,
             Err(err) => {
                 warn!("HTTP request creation failed: {:?}", err);
@@ -236,24 +276,8 @@ async fn main(spawner: Spawner) {
 
         match from_slice::<CommandPayload>(body_str.as_bytes()) {
             Ok((payload, _)) => {
-                if let Some(command_str) = payload.command.map(|c| c.trim()) {
-                    if command_str.is_empty() {
-                        info!("Received empty command");
-                    } else {
-                        info!("Received command '{}'", command_str);
-
-                        match IrSignal::from_text(command_str) {
-                            Some(signal) => {
-                                transmit_ir_signal(&mut ir_led, signal.pulses.as_slice()).await;
-                            }
-                            None => {
-                                warn!("Failed to parse IR command payload");
-                            }
-                        }
-                    }
-                } else {
-                    info!("No command present in response");
-                }
+                info!("Received command '{}'", payload.command.name());
+                transmit_ir_signal(&mut ir_led, payload.command.pulses()).await;
             }
             Err(err) => {
                 warn!(

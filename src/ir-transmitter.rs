@@ -8,7 +8,6 @@ use embassy_rp::peripherals::UART0;
 use embassy_rp::uart::{BufferedInterruptHandler, BufferedUart, Config as UartConfig};
 use embassy_rp::bind_interrupts;
 use embassy_time::{Duration, Timer};
-use embedded_io_async::Read;
 use heapless::String;
 use ir_sunrise::IrSignal;
 use {defmt_rtt as _, panic_probe as _};
@@ -76,9 +75,9 @@ async fn main(_spawner: Spawner) {
     
     let uart = BufferedUart::new(
         p.UART0,
-        Irqs,
         p.PIN_0,
         p.PIN_1,
+        Irqs,
         unsafe { &mut *core::ptr::addr_of_mut!(TX_BUF) },
         unsafe { &mut *core::ptr::addr_of_mut!(RX_BUF) },
         uart_config,
@@ -105,66 +104,66 @@ async fn main(_spawner: Spawner) {
     }
 
     let mut line_buffer = String::<MAX_LINE_LEN>::new();
-    
+
     loop {
-        // Read from UART
+        // Read from UART - blocking read
         let mut buf = [0u8; 1];
-        
-        match rx.read(&mut buf).await {
-            Ok(_) => {
-                let ch = buf[0] as char;
-                
-                if ch == '\n' || ch == '\r' {
-                    if !line_buffer.is_empty() {
-                        info!("Received command: {}", line_buffer.as_str());
-                        
-                        // Try to find matching signal
-                        let mut found = false;
-                        
-                        for signal in IR_SIGNALS.iter() {
-                            if let Some(colon_pos) = signal.find(':') {
-                                let name = &signal[..colon_pos];
-                                
-                                if name.eq_ignore_ascii_case(line_buffer.as_str().trim()) {
-                                    info!("Matched signal: {}", name);
-                                    
-                                    // Parse and transmit
-                                    if let Some(ir_signal) = IrSignal::from_text(signal) {
-                                        transmit_ir_signal(&mut ir_led, &ir_signal.pulses).await;
-                                        found = true;
-                                    } else {
-                                        error!("Failed to parse signal: {}", name);
-                                    }
-                                    break;
-                                }
-                            }
-                        }
-                        
-                        // Also support direct IR_SIGNAL format from decoder
-                        if !found && line_buffer.starts_with("IR_SIGNAL:") {
-                            info!("Parsing direct IR signal format");
-                            if let Some(ir_signal) = IrSignal::from_text(line_buffer.as_str()) {
-                                transmit_ir_signal(&mut ir_led, &ir_signal.pulses).await;
-                                found = true;
-                            }
-                        }
-                        
-                        if !found {
-                            warn!("Unknown command: {}", line_buffer.as_str());
-                        }
-                        
-                        line_buffer.clear();
-                    }
-                } else if ch.is_ascii() && !ch.is_ascii_control() {
-                    if line_buffer.push(ch).is_err() {
-                        warn!("Line buffer full, clearing");
-                        line_buffer.clear();
-                    }
-                }
-            }
+        match rx.blocking_read(&mut buf) {
+            Ok(_) => {}
             Err(e) => {
                 error!("UART read error: {:?}", e);
                 Timer::after(Duration::from_millis(100)).await;
+                continue;
+            }
+        }
+        
+        let ch = buf[0] as char;
+
+        if ch == '\n' || ch == '\r' {
+            if !line_buffer.is_empty() {
+                info!("Received command: {}", line_buffer.as_str());
+
+                // Try to find matching signal
+                let mut found = false;
+
+                for signal in IR_SIGNALS.iter() {
+                    if let Some(colon_pos) = signal.find(':') {
+                        let name = &signal[..colon_pos];
+
+                        if name.eq_ignore_ascii_case(line_buffer.as_str().trim()) {
+                            info!("Matched signal: {}", name);
+
+                            // Parse and transmit
+                            if let Some(ir_signal) = IrSignal::from_text(signal) {
+                                transmit_ir_signal(&mut ir_led, &ir_signal.pulses).await;
+                                found = true;
+                            } else {
+                                error!("Failed to parse signal: {}", name);
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                // Also support direct IR_SIGNAL format from decoder
+                if !found && line_buffer.starts_with("IR_SIGNAL:") {
+                    info!("Parsing direct IR signal format");
+                    if let Some(ir_signal) = IrSignal::from_text(line_buffer.as_str()) {
+                        transmit_ir_signal(&mut ir_led, &ir_signal.pulses).await;
+                        found = true;
+                    }
+                }
+
+                if !found {
+                    warn!("Unknown command: {}", line_buffer.as_str());
+                }
+
+                line_buffer.clear();
+            }
+        } else if ch.is_ascii() && !ch.is_ascii_control() {
+            if line_buffer.push(ch).is_err() {
+                warn!("Line buffer full, clearing");
+                line_buffer.clear();
             }
         }
     }

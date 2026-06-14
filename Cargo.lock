@@ -192,7 +192,7 @@ dependencies = [
  "embedded-io 0.6.1",
  "embedded-io-async 0.6.1",
  "futures-intrusive",
- "heapless 0.8.0",
+ "heapless 0.9.2",
 ]
 
 [[package]]
@@ -403,6 +403,12 @@ dependencies = [
  "heapless 0.8.0",
  "num_enum 0.5.11",
 ]
+
+[[package]]
+name = "cyw43-firmware"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1f6670bcc22685ab25c8262b9bfdcdbbb12e12605569fc4bcf8b01aa5dc55c2"
 
 [[package]]
 name = "cyw43-pio"
@@ -1448,6 +1454,7 @@ dependencies = [
  "cortex-m-rt",
  "critical-section",
  "cyw43",
+ "cyw43-firmware",
  "cyw43-pio",
  "defmt 1.0.1",
  "defmt-rtt",

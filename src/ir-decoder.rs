@@ -79,10 +79,10 @@ async fn main(_spawner: Spawner) {
             
             // Convert to text format
             let text = signal.to_text();
-            info!("Sending via UART: {} bytes", text.len());
+            info!("Sending: {} bytes", text.len());
             
             // Send over UART serial
-            uart.blocking_write(text.as_bytes()).unwrap();
+            info!("{}", text);
             info!("Signal sent successfully");
         } else {
             warn!("Signal incomplete or empty");

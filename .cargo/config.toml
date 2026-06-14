@@ -1,5 +1,6 @@
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
-runner = "boot probe-run bootpi/2e8a:000c:E661AC8863455D24 -s bootpi/ttyACM0"
+runner = "probe-rs run"
+#runner = "boot probe-run bootpi/2e8a:000c:E661AC8863455D24 -s bootpi/ttyACM0"
 #runner = "elf2uf2-rs -d"
 #runner = "picotool load -u -v -x -t elf"
 
@@ -8,6 +9,9 @@ target = "thumbv8m.main-none-eabihf"
 
 [env]
 DEFMT_LOG = "debug"
+IR_SUNRISE_WIFI_SSID = { value = "wifi-ssid", force = true }
+IR_SUNRISE_WIFI_PASSWORD = { value = "wifi-password", force = true }
+IR_SUNRISE_URL = { value = "http://192.168.1.100/room1", force = true }
 
 [net]
 git-fetch-with-cli = true
