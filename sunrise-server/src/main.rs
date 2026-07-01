@@ -1,11 +1,23 @@
 use chrono::{Local, Timelike};
+use clap::Parser;
 use dropshot::{
-    endpoint, ApiDescription, ConfigDropshot, ConfigLogging, ConfigLoggingLevel,
-    HttpError, HttpResponseOk, HttpServerStarter, RequestContext,
+    endpoint, ApiDescription, ConfigDropshot, ConfigLogging, ConfigLoggingLevel, HttpError,
+    HttpResponseOk, HttpServerStarter, RequestContext,
 };
+use schemars::JsonSchema;
 use serde::Serialize;
+use std::net::SocketAddr;
 
-#[derive(Serialize)]
+/// Sunrise server configuration.
+#[derive(Parser, Debug)]
+#[command(version, about)]
+struct Config {
+    /// Address to bind the HTTP server to.
+    #[arg(long, env = "SUNRISE_BIND", default_value = "0.0.0.0:41399")]
+    bind: SocketAddr,
+}
+
+#[derive(JsonSchema, Serialize)]
 struct CommandResponse {
     command: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -17,7 +29,7 @@ fn current_command() -> CommandResponse {
     let total_minutes = now.hour() * 60 + now.minute();
 
     let window_start = 5 * 60 + 30; // 5:30 AM
-    let window_end = 6 * 60 + 30;   // 6:30 AM
+    let window_end = 6 * 60 + 30; // 6:30 AM
 
     if (window_start..window_end).contains(&total_minutes) {
         let elapsed = total_minutes - window_start;
@@ -53,8 +65,10 @@ fn api() -> ApiDescription<()> {
 
 #[tokio::main]
 async fn main() -> Result<(), String> {
+    let config = Config::parse();
+
     let config_dropshot = ConfigDropshot {
-        bind_address: "0.0.0.0:78669".parse().unwrap(),
+        bind_address: config.bind,
         ..Default::default()
     };
 
@@ -62,14 +76,13 @@ async fn main() -> Result<(), String> {
         level: ConfigLoggingLevel::Info,
     };
 
-    let server = HttpServerStarter::new(
-        &config_dropshot,
-        api(),
-        (),
-        &config_logging,
-    )
-    .map_err(|e| e.to_string())?
-    .start();
+    let log = config_logging
+        .to_logger("sunrise-server")
+        .map_err(|e| e.to_string())?;
+
+    let server = HttpServerStarter::new(&config_dropshot, api(), (), &log)
+        .map_err(|e| e.to_string())?
+        .start();
 
     server.await.map_err(|e| e.to_string())
 }

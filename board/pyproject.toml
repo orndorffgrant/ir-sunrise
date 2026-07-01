@@ -1,0 +1,15 @@
+[project]
+name = "board"
+version = "0.1.0"
+description = "Schematic/netlist definitions built with SKiDL"
+requires-python = ">=3.10"
+dependencies = [
+    "skidl>=1.2.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = false

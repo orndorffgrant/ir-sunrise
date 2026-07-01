@@ -1,0 +1,15 @@
+[project]
+name = "enclosure"
+version = "0.1.0"
+description = "Parametric enclosure models built with CadQuery"
+requires-python = ">=3.10"
+dependencies = [
+    "cadquery>=2.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = false

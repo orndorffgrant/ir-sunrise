@@ -6,7 +6,9 @@ license = "GPL-3.0"
 
 [dependencies]
 chrono = "0.4"
+clap = { version = "4", features = ["derive", "env"] }
 dropshot = "0.12"
+schemars = "0.8"
 serde = { version = "1", features = ["derive"] }
 slog = "2"
 tokio = { version = "1", features = ["full"] }

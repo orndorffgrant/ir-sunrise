@@ -1,0 +1,9 @@
+# Generated netlist output
+out/
+*.erc
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/

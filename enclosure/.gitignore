@@ -1,0 +1,7 @@
+# Generated CAD output
+out/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
